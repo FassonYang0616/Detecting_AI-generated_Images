@@ -1,10 +1,5 @@
-import tensorflow as tf
+import torch
 
-# 创建一个简单的计算图来测试GPU
-a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
-b = tf.constant([[1.0, 1.0], [0.0, 1.0]])
-c = tf.matmul(a, b)
-
-print("If GPU is working, you should see a GPU device in the list below:")
-print(tf.config.experimental.list_physical_devices('GPU'))
-print("Result of matrix multiplication: \n", c)
+print("CUDA available: ", torch.cuda.is_available())
+print("Number of GPUs: ", torch.cuda.device_count())
+print("CUDA device: ", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No CUDA device found")

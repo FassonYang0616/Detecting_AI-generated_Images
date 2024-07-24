@@ -1,9 +1,7 @@
-import tensorflow as tf
-from datasets import load_dataset
-from tensorflow.keras.applications import VGG19
-from tensorflow.keras.applications.vgg19 import preprocess_input
-from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras.models import Model
+import torch
+import torchvision.transforms as transforms
+import torchvision.models as models
+from torch.utils.data import Dataset, DataLoader
 from sklearn.svm import OneClassSVM
 import pandas as pd
 import numpy as np
@@ -11,65 +9,79 @@ from PIL import Image
 import io
 import os
 import joblib
+from datasets import load_dataset
 
 # 检查是否有可用的GPU
-print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
-def preprocess_image(image, target_size=(224, 224)):
-    intermediate_size = (256, 256)
-    if image.size[0] > intermediate_size[0] or image.size[1] > intermediate_size[1]:
-        image = image.resize(intermediate_size, Image.Resampling.LANCZOS)
-    left = (image.width - target_size[0]) / 2
-    top = (image.height - target_size[1]) / 2
-    right = (image.width + target_size[0]) / 2
-    bottom = (image.height + target_size[1]) / 2
-    image = image.crop((left, top, right, bottom))
-    return image
+# 定义数据集类
+class CustomDataset(Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
 
-# 加载预训练的CNN模型
-base_model = VGG19(weights='imagenet')
-model = Model(inputs=base_model.input, outputs=base_model.get_layer('fc1').output)
+    def __len__(self):
+        return len(self.dataset)
 
-def load_and_preprocess_data(dataset, batch_size=100):
-    features = []
-    batch_images = []
-    for i, item in enumerate(dataset):
-        image_data = item['image']
+    def __getitem__(self, idx):
+        image_data = self.dataset[idx]['image']
         if isinstance(image_data, bytes):
-            image = Image.open(io.BytesIO(image_data))
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
         else:
             image = image_data
-        image = preprocess_image(image, target_size=(224, 224))
-        image = img_to_array(image)
-        image = preprocess_input(image)
-        batch_images.append(image)
+        label = self.dataset[idx]['image_nsfw']
 
-        if len(batch_images) == batch_size:
-            batch_images_np = np.array(batch_images)
-            batch_features = model.predict(batch_images_np)
-            for feature in batch_features:
-                features.append(feature.flatten())
-            batch_images = []
-            print(f"Processed {i+1} images")
+        if self.transform:
+            image = self.transform(image)
 
-    # Process remaining images
-    if batch_images:
-        batch_images_np = np.array(batch_images)
-        batch_features = model.predict(batch_images_np)
-        for feature in batch_features:
-            features.append(feature.flatten())
-        print(f"Processed {i+1} images")
+        return image, label
 
-    return np.array(features)
+# 定义图像预处理
+preprocess = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
 
-# 加载和预处理数据
-dataset = load_dataset("poloclub/diffusiondb", "2m_random_1k", split='train', trust_remote_code=True)
+# 加载预训练的CNN模型
+model = models.vgg19(pretrained=True).to(device)
+model.classifier = model.classifier[:-1]  # 去掉最后一层
+model.eval()
+
+# 加载数据集
+dataset = load_dataset("poloclub/diffusiondb", "2m_random_100k", split='train', trust_remote_code=True)
 print("Number of items before filtering:", len(dataset))
-
+# 过滤数据
 filtered_dataset = dataset.filter(lambda x: x['image_nsfw'] != 2)
 print("Number of items after filtering:", len(filtered_dataset))
+# 创建数据集和数据加载器
+custom_dataset = CustomDataset(filtered_dataset, transform=preprocess)
+data_loader = DataLoader(custom_dataset, batch_size=100, shuffle=False)
 
-# Create a folder to save images
+# 提取特征
+def extract_features(data_loader, model, device):
+    features = []
+    with torch.no_grad():
+        for images, _ in data_loader:
+            images = images.to(device)
+            outputs = model(images)
+            features.append(outputs.cpu().numpy())
+    return np.concatenate(features, axis=0)
+
+# 使用所有数据进行特征提取
+features = extract_features(data_loader, model, device)
+
+# 训练One-Class SVM模型
+oc_svm = OneClassSVM(kernel='rbf', gamma='auto').fit(features)
+
+# 保存训练好的模型
+model_filename = 'one_class_svm_model_pytorch.joblib'
+joblib.dump(oc_svm, model_filename)
+print(f"Trained model saved as {model_filename}")
+
+# 保存数据记录和图像
 image_folder = 'dataset_images'
 os.makedirs(image_folder, exist_ok=True)
 data_records = []
@@ -89,14 +101,3 @@ df = pd.DataFrame(data_records)
 df.to_csv(f'{image_folder}/dataset_records.csv', index=False)
 
 print("All data has been saved locally.")
-
-# 使用所有数据进行训练
-features = load_and_preprocess_data(filtered_dataset, batch_size=100)
-
-# 训练One-Class SVM模型
-oc_svm = OneClassSVM(kernel='rbf', gamma='auto').fit(features)
-
-# 保存训练好的模型
-model_filename = 'one_class_svm_model.joblib'
-joblib.dump(oc_svm, model_filename)
-print(f"Trained model saved as {model_filename}")
