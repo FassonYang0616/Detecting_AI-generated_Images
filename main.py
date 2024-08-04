@@ -1,52 +1,84 @@
-from datasets import load_dataset
+import random
 import pandas as pd
+from datasets import load_dataset
 from PIL import Image
 import io
 import os
+import matplotlib.pyplot as plt
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
 
-# 从hugging face加载数据集
-dataset = load_dataset("poloclub/diffusiondb", "2m_random_1k", split='train', trust_remote_code=True)
+from Image_Preprocess import CustomDataset
 
-# 输出加载的数据量
-print("Number of items before filtering:", len(dataset))
 
-# 过滤掉'image_nsfw'值为2的数据
-filtered_dataset = dataset.filter(lambda x: x['image_nsfw'] != 2)
+def save_random_images(dataset, save_folder, num_images=10):
+    os.makedirs(save_folder, exist_ok=True)
+    random_indices = random.sample(range(len(dataset)), num_images)
 
-# 输出过滤后的数据量
-print("Number of items after filtering:", len(filtered_dataset))
+    for i, idx in enumerate(random_indices):
+        image_data = dataset[idx]['image']
+        if isinstance(image_data, bytes):
+            image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        else:
+            image = image_data
 
-# 创建一个文件夹用于保存下载的数据集
-image_folder = 'dataset_images'
-os.makedirs(image_folder, exist_ok=True)
+        image.save(os.path.join(save_folder, f'random_image_{i}.png'))
+        plt.imshow(image)
+        plt.show()
 
-# 新建一个列表存储图片的文字数据
-data_records = []
 
-# 迭代过滤数据集中的每个项
-for i, item in enumerate(filtered_dataset):
-    # 提取图像数据，假设它在' image' 键中
-    image_data = item['image']
+def load_and_preprocess_data():
+    dataset = load_dataset("poloclub/diffusiondb", "2m_random_10k", split='train', trust_remote_code=True)
+    print("Number of items before filtering:", len(dataset))
 
-    # 检查图像数据是否为字节格式并进行相应处理
-    if isinstance(image_data, bytes):
-        image = Image.open(io.BytesIO(image_data))
-    else:
-        # 如果图像数据已经是一个PIL image对象
-        image = image_data
-    # end if
+    # 过滤掉'image_nsfw'值为2的数据
+    filtered_dataset = dataset.filter(lambda x: x['image_nsfw'] != 2)
 
-    # 将这个image对象保存为.png格式
-    image.save(f'{image_folder}/image_{i}.png')
+    # 保存随机选择的10张图像到指定路径
+    save_random_images(filtered_dataset, 'Dataset/DiffusionDB/DataSet')
+    print("Number of items after filtering:", len(filtered_dataset))
 
-    # 处理非图像的数据
-    record = {key: val for key, val in item.items() if key != 'image'}
-    record['image_path'] = f'{image_folder}/image_{i}.png'
-    data_records.append(record)
-# end for
+    preprocess = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    custom_dataset = CustomDataset(filtered_dataset, transform=preprocess)
+    return custom_dataset
 
-# 将非图像数据存储为CSV文件
-df = pd.DataFrame(data_records)
-df.to_csv(f'{image_folder}/dataset_records.csv', index=False)
 
-print("All data has been saved locally.")
+def save_preprocessed_data(dataset, image_folder, csv_path):
+    # 验证文件夹是否存在，如果不存在则创建
+    if not os.path.exists(image_folder):
+        os.makedirs(image_folder)
+
+    data_records = []
+
+    for i, (image, label) in enumerate(DataLoader(dataset, batch_size=1)):
+        image_pil = transforms.ToPILImage()(image[0])
+        image_path = os.path.join(image_folder, f'image_{i}.png')
+        image_pil.save(image_path)
+
+        record = {'image_path': image_path, 'label': label.item()}
+        data_records.append(record)
+
+    df = pd.DataFrame(data_records)
+    df.to_csv(csv_path, index=False)
+    print("All preprocessed data has been saved locally.")
+
+
+def main():
+    # 定义保存路径
+    original_image_folder = 'Dataset/DiffusionDB/DataSet'
+    preprocessed_image_folder = 'Dataset/DiffusionDB/AfterPreprocess'
+    csv_path = os.path.join(preprocessed_image_folder, 'dataset_records.csv')
+    # 加载和预处理数据
+    custom_dataset = load_and_preprocess_data()
+
+    # 保存预处理后的数据
+    save_preprocessed_data(custom_dataset, preprocessed_image_folder, csv_path)
+
+
+if __name__ == '__main__':
+    main()
